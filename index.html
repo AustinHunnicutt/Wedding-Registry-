@@ -64,10 +64,7 @@ footer{text-align:center;color:var(--muted);font-size:13px;line-height:1.55;marg
     <label for="claimName">Your name</label>
     <input id="claimName" maxlength="80" required placeholder="Your name">
     <label for="claimStatus">What would you like to do?</label>
-    <select id="claimStatus">
-      <option value="reserved">I'm planning to buy this</option>
-      <option value="purchased">I bought this</option>
-    </select>
+    <select id="claimStatus"></select>
     <div class="modal-actions">
       <button value="cancel">Cancel</button>
       <button id="confirmClaim" class="primary" value="default">Save</button>
@@ -124,7 +121,12 @@ function renderGifts(){
   giftGrid.innerHTML=visible.map(g=>{
     const st=g.status||"available";
     const stText=st==="available"?"Available":st==="reserved"?`Reserved by <span class="purchaser">${esc(g.purchaser)}</span>`:`Purchased by <span class="purchaser">${esc(g.purchaser)}</span>`;
-    const action=st==="available"?`<button data-claim="${g.id}">Claim / mark purchased</button>`:st==="reserved"?`<button data-claim="${g.id}">I reserved this — mark purchased</button>`:"";
+    const hasLocalClaim = !!localStorage.getItem("registry-claim-" + g.id);
+    const action = st==="available"
+      ? `<button data-claim="${g.id}">Claim / mark purchased</button>`
+      : hasLocalClaim
+        ? `<button data-claim="${g.id}">Change / release my claim</button>`
+        : `<button data-claim="${g.id}">I made this claim</button>`;
     return `<article class="card ${st}">
       <div class="category-label">${esc(g.category||"Uncategorized")}</div>
       <h3>${esc(g.name)}</h3>
@@ -140,30 +142,84 @@ function renderGifts(){
   }).join("");
   giftGrid.querySelectorAll("[data-claim]").forEach(b=>b.onclick=()=>openClaim(b.dataset.claim));
 }
+function makeClaimToken(){
+  if(window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  const bytes=new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes,b=>b.toString(16).padStart(2,"0")).join("");
+}
+function claimStorageKey(id){return "registry-claim-"+id}
 function openClaim(id){
-  const g=gifts.find(x=>x.id===id); if(!g||g.status==="purchased") return;
-  claimGiftId=id; claimTitle.textContent=g.name; claimName.value="";
-  if(g.status==="reserved"){
-    claimText.textContent=`This is reserved by ${g.purchaser}. If that's you, enter the same name to mark it purchased.`;
-    claimStatus.value="purchased"; claimStatus.disabled=true;
-  }else{
+  const g=gifts.find(x=>x.id===id); if(!g) return;
+  claimGiftId=id;
+  claimTitle.textContent=g.name;
+  claimName.value="";
+  claimStatus.disabled=false;
+  claimStatus.innerHTML="";
+
+  const localToken=localStorage.getItem(claimStorageKey(id));
+
+  if(g.status==="available"){
     claimText.textContent="Enter your name, then reserve the gift or mark it purchased.";
-    claimStatus.value="reserved"; claimStatus.disabled=false;
+    claimStatus.innerHTML=`
+      <option value="reserved">I'm planning to buy this</option>
+      <option value="purchased">I bought this</option>`;
+  } else if(localToken){
+    claimText.textContent=`This is currently ${g.status} by ${g.purchaser}. You can change the status or release it back to the registry.`;
+    if(g.status==="reserved"){
+      claimStatus.innerHTML=`
+        <option value="purchased">I bought this</option>
+        <option value="available">Release it — make available again</option>`;
+    }else{
+      claimStatus.innerHTML=`
+        <option value="reserved">Move it back to reserved</option>
+        <option value="available">Release it — make available again</option>`;
+    }
+    claimName.value=g.purchaser||"";
+  } else {
+    claimText.textContent=`This is currently ${g.status} by ${g.purchaser}. If you made this claim before the update, enter the same name to recover it.`;
+    if(g.status==="reserved"){
+      claimStatus.innerHTML=`
+        <option value="purchased">I bought this</option>
+        <option value="available">Release it — make available again</option>`;
+    }else{
+      claimStatus.innerHTML=`
+        <option value="reserved">Move it back to reserved</option>
+        <option value="available">Release it — make available again</option>`;
+    }
   }
   claimDialog.showModal();
 }
 confirmClaim.addEventListener("click",async e=>{
   e.preventDefault();
   const name=claimName.value.trim(), status=claimStatus.value;
-  if(!name) return;
+  if(status!=="available" && !name) return;
+  const gift=gifts.find(x=>x.id===claimGiftId);
+  let token=localStorage.getItem(claimStorageKey(claimGiftId)) || "";
+  const wasAvailable = gift && gift.status==="available";
+  if(wasAvailable && !token) token=makeClaimToken();
+  if(!wasAvailable && !token) token=makeClaimToken();
+
   confirmClaim.disabled=true; confirmClaim.textContent="Saving…";
   try{
-    const res=await fetch(API+"/rpc/claim_registry_gift",{
+    const res=await fetch(API+"/rpc/manage_registry_gift",{
       method:"POST",
       headers:{...API_HEADERS,"Content-Type":"application/json"},
-      body:JSON.stringify({p_gift_id:claimGiftId,p_purchaser:name,p_status:status})
+      body:JSON.stringify({
+        p_gift_id:claimGiftId,
+        p_purchaser:name,
+        p_status:status,
+        p_claim_token:token
+      })
     });
     if(!res.ok){const info=await safeJson(res);throw new Error(info?.message||"Could not save your selection")}
+
+    if(status==="available"){
+      localStorage.removeItem(claimStorageKey(claimGiftId));
+    }else{
+      localStorage.setItem(claimStorageKey(claimGiftId),token);
+    }
+
     claimDialog.close(); await loadRegistry(false);
   }catch(err){alert(err.message);await loadRegistry(false)}
   finally{confirmClaim.disabled=false;confirmClaim.textContent="Save"}
